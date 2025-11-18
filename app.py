@@ -1,103 +1,35 @@
 import os
-import io
 import json
-import zipfile
-import requests
 import numpy as np
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 from PIL import Image
-import cv2
+import tensorflow as tf
 
-from tensorflow.keras.models import load_model
-from tensorflow.nn import softmax
+# ===================================================================
+#  APP SETUP
+# ===================================================================
 
 app = Flask(__name__)
-app.config['UPLOAD_FOLDER'] = 'uploads'
-os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+app.config["UPLOAD_FOLDER"] = "uploads"
+os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 
+TFLITE_DIR = "tflite_models"
+os.makedirs(TFLITE_DIR, exist_ok=True)
 
-# ==========================================================================================
-#                   GOOGLE CLOUD STORAGE - DIRECT PUBLIC ZIP DOWNLOAD LINKS
-# ==========================================================================================
+# ===================================================================
+#  NORMALIZER
+# ===================================================================
 
-GCS_LINKS = {
-    "custom": "https://storage.googleapis.com/food-classification-models-bucket/custom_models.zip",
-    "resnet": "https://storage.googleapis.com/food-classification-models-bucket/Resnet_models.zip",
-    "vgg":    "https://storage.googleapis.com/food-classification-models-bucket/Vgg_models.zip"
-}
+def normalize(x: str):
+    """Lowercase and replace spaces with underscores."""
+    return x.lower().strip().replace(" ", "_")
 
-MODEL_DIRS = {
-    "custom": "custom_models",
-    "resnet": "Resnet_models",
-    "vgg": "vgg_models"
-}
-
-for d in MODEL_DIRS.values():
-    os.makedirs(d, exist_ok=True)
-
-
-# ==========================================================================================
-#                        DOWNLOAD AND EXTRACT ZIP IF NOT PRESENT
-# ==========================================================================================
-
-def download_and_extract_if_needed(model_type):
-    folder = MODEL_DIRS[model_type]
-    url = GCS_LINKS[model_type]
-    zip_path = f"{folder}.zip"
-
-    # If .h5 files exist → skip
-    if any(f.endswith(".h5") for f in os.listdir(folder)):
-        print(f"[INFO] {model_type} models already extracted.")
-        return
-
-    print(f"[INFO] Downloading {model_type} models from GCS...")
-
-    try:
-        response = requests.get(url, stream=True)
-        response.raise_for_status()
-    except Exception as e:
-        print(f"[ERROR] Failed to download {model_type}: {e}")
-        return
-
-    # Save ZIP file
-    with open(zip_path, "wb") as f:
-        f.write(response.content)
-
-    print(f"[INFO] Extracting ZIP for {model_type}...")
-
-    try:
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            zip_ref.extractall(folder)
-        print(f"[INFO] Extraction complete for {model_type}.")
-    except Exception as e:
-        print(f"[ERROR] Extraction failed for {model_type}: {e}")
-
-
-# DOWNLOAD ON STARTUP
-download_and_extract_if_needed("custom")
-download_and_extract_if_needed("resnet")
-download_and_extract_if_needed("vgg")
-
-
-# ==========================================================================================
-#                             JSON FILES & CLASS MAPPING
-# ==========================================================================================
-
-CLASS_NAMES_FILE = 'class.json'
-CUSTOM_JSON_FILE = 'model_evaluation_results.json'
-RESNET_JSON_FILE = 'model_evaluation_results_resnet.json'
-VGG_JSON_FILE = 'model_evaluation_results_vgg.json'
-
-NUTRITION_JSON = json.load(open(CLASS_NAMES_FILE, "r"))
-
-def normalize(name):
-    return name.lower().replace(" ", "_")
-
+# ===================================================================
+#  MODEL → CLASS INDEX MAPPING
+# ===================================================================
 
 RAW_MODEL_CLASS_INDEX = {
-
-    # CUSTOM MODELS
     "custom_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "custom_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "custom_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -110,7 +42,6 @@ RAW_MODEL_CLASS_INDEX = {
     "custom_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "custom_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # RESNET MODELS
     "resnet_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "resnet_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "resnet_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -123,7 +54,6 @@ RAW_MODEL_CLASS_INDEX = {
     "resnet_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "resnet_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # VGG MODELS
     "vgg_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "vgg_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "vgg_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -134,62 +64,75 @@ RAW_MODEL_CLASS_INDEX = {
     "vgg_model_8":  {'kulfi': 0, 'masala_dosa': 1, 'momos': 2},
     "vgg_model_9":  {'omelette': 0, 'paani_puri': 1, 'pakode': 2},
     "vgg_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
-    "vgg_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3}
+    "vgg_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 }
 
-RAW_MODEL_CLASS_INDEX = {
-    m: {normalize(cls): idx for cls, idx in mapping.items()}
+# Normalize mapping
+MODEL_CLASS_INDEX = {
+    m.lower(): {normalize(k): v for k, v in mapping.items()}
     for m, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
-MODEL_CLASS_INDEX = {m.lower(): v for m, v in RAW_MODEL_CLASS_INDEX.items()}
+# ===================================================================
+#  LOAD CLASSES
+# ===================================================================
 
-CLASS_NAMES = json.load(open(CLASS_NAMES_FILE))
-CLASS_LIST = list(CLASS_NAMES.keys())
+CLASS_JSON = json.load(open("class.json"))
+CLASS_LIST = list(CLASS_JSON.keys())
 
+# ===================================================================
+#  LOAD METRICS JSON + NORMALIZE KEYS
+# ===================================================================
 
-# ==========================================================================================
-#                               MODEL LOADING & CACHE
-# ==========================================================================================
+MODEL_EVAL_JSON = {
+    "custom_model": json.load(open("model_evaluation_results.json")),
+    "resnet_model": json.load(open("model_evaluation_results_resnet.json")),
+    "vgg_model": json.load(open("model_evaluation_results_vgg.json"))
+}
 
-_model_cache = {}
+# Fix keys (lowercase + underscores)
+for model_type, content in MODEL_EVAL_JSON.items():
+    fixed = {}
+    for key, val in content.items():
+        fixed[normalize(key)] = val
+    MODEL_EVAL_JSON[model_type] = fixed
 
-def load_model_cached(path):
-    if path not in _model_cache:
-        print(f"[INFO] LOADING MODEL → {path}")
-        _model_cache[path] = load_model(path)
-    return _model_cache[path]
+# ===================================================================
+#  TFLITE CACHING (ONLY 1 MODEL IN MEMORY)
+# ===================================================================
 
+tflite_cache = {}
 
-# ==========================================================================================
-#                                FIND MODEL FILE
-# ==========================================================================================
+def load_tflite_model(model_name):
+    global tflite_cache
 
-def get_model_path(model_type, model_used):
-    model_used = model_used.replace(".h5", "")
-    folder = MODEL_DIRS[model_type.replace("_model", "")]
+    # Clear if loading a different model
+    if model_name not in tflite_cache:
+        tflite_cache = {}
+        path = os.path.join(TFLITE_DIR, model_name + ".tflite")
 
-    for f in os.listdir(folder):
-        if model_used in f:
-            return os.path.join(folder, f)
+        if not os.path.exists(path):
+            print("[ERROR] Missing TFLite file:", path)
+            return None
 
-    return None
+        interpreter = tf.lite.Interpreter(model_path=path)
+        interpreter.allocate_tensors()
+        tflite_cache[model_name] = interpreter
 
+    return tflite_cache[model_name]
 
-# ==========================================================================================
-#                               IMAGE PREPROCESSING
-# ==========================================================================================
+# ===================================================================
+#  IMAGE PREPROCESS
+# ===================================================================
 
-def preprocess_dynamic(img, w, h):
-    img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-    img = cv2.resize(img, (w, h))
-    img = np.expand_dims(img, 0).astype("float32") / 255.0
-    return img
+def preprocess(img, size):
+    img = img.resize((size, size))
+    arr = np.array(img).astype("float32") / 255.0
+    return np.expand_dims(arr, 0)
 
-
-# ==========================================================================================
-#                                      ROUTES
-# ==========================================================================================
+# ===================================================================
+#  ROUTES
+# ===================================================================
 
 @app.route("/")
 def index():
@@ -198,65 +141,78 @@ def index():
 
 @app.route("/predict", methods=["POST"])
 def predict():
-
     if "file" not in request.files:
-        return jsonify({"success": False, "error": "No file uploaded"})
+        return jsonify({"success": False, "error": "No image uploaded"})
 
-    file = request.files["file"]
-    model_type = request.form.get("model_type")
-    selected_class = request.form.get("selected_class")
+    img_file = request.files["file"]
+    fname = secure_filename(img_file.filename)
+    file_path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
+    img_file.save(file_path)
 
-    filepath = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(file.filename))
-    file.save(filepath)
-
-    eval_json = json.load(open(
-        CUSTOM_JSON_FILE if model_type == "custom_model" else
-        RESNET_JSON_FILE if model_type == "resnet_model" else
-        VGG_JSON_FILE
-    ))
-
+    model_type = request.form.get("model_type").lower()
+    selected_class = request.form.get("selected_class", "").strip()
     cname = normalize(selected_class)
 
-    model_used = None
-    class_entry = None
+    # Load JSON metrics for selected class
+    class_info = MODEL_EVAL_JSON[model_type].get(cname)
+    if class_info is None:
+        return jsonify({"success": False, "error": "Class not found in JSON", "class_lookup": cname})
 
-    for key, val in eval_json.items():
-        if normalize(key) == cname:
-            model_used = val["model_used"]
-            class_entry = val
-            break
+    model_used = class_info["model_used"].lower()
 
-    if not model_used:
-        return jsonify({"success": False, "error": "Model not found for this class"})
+    interpreter = load_tflite_model(model_used)
+    if interpreter is None:
+        return jsonify({"success": False, "error": "Model missing on server"})
 
-    model_used = model_used.lower()
-    model_path = get_model_path(model_type, model_used)
+    input_info = interpreter.get_input_details()[0]
+    _, h, w, _ = input_info["shape"]
 
-    if not model_path:
-        return jsonify({"success": False, "error": "Model file missing"})
+    img = Image.open(file_path).convert("RGB")
+    x = preprocess(img, w)
 
-    model = load_model_cached(model_path)
+    interpreter.set_tensor(input_info["index"], x)
+    interpreter.invoke()
 
-    _, h, w, _ = model.input_shape
-    img = Image.open(filepath)
-    x = preprocess_dynamic(img, w, h)
+    output = interpreter.get_output_details()[0]
+    preds = interpreter.get_tensor(output["index"]).squeeze().astype(float)
+    preds = np.nan_to_num(preds)
 
-    pred = model.predict(x).squeeze()
-    pred = softmax(pred).numpy() if np.sum(pred) == 0 else pred
+    idx = int(np.argmax(preds))
+    confidence = float(np.max(preds))
 
-    idx = int(np.argmax(pred))
+    class_map = MODEL_CLASS_INDEX[model_used]
+    predicted_label = next(key for key, val in class_map.items() if val == idx)
+    predicted_label_norm = normalize(predicted_label)
 
-    label = next((cls for cls, i in MODEL_CLASS_INDEX[model_used].items() if i == idx), None)
-    conf = float(np.max(pred))
+    predicted_info = MODEL_EVAL_JSON[model_type].get(predicted_label_norm, {})
+
+    labels = list(class_map.keys())
+    matrix = predicted_info.get("confusion_matrix_full", [])
 
     return jsonify({
         "success": True,
-        "predicted_label": label,
-        "confidence": conf,
-        "model_used": model_used,
-        "class_metrics": class_entry
+        "selected_class": selected_class,
+        "predicted_label": predicted_label,
+        "confidence": confidence,
+
+        "accuracy": predicted_info.get("accuracy", "NA"),
+        "precision": predicted_info.get("precision", "NA"),
+        "recall": predicted_info.get("recall", "NA"),
+        "f1_score": predicted_info.get("f1_score", "NA"),
+        "true_positive": predicted_info.get("true_positive", "NA"),
+        "false_positive": predicted_info.get("false_positive", "NA"),
+        "false_negative": predicted_info.get("false_negative", "NA"),
+        "true_negative": predicted_info.get("true_negative", "NA"),
+
+        "confusion_matrix_labels": labels,
+        "confusion_matrix_full": matrix,
+
+        "model_used": model_used
     })
 
+# ===================================================================
+#  MAIN
+# ===================================================================
 
 if __name__ == "__main__":
     app.run(debug=True)
