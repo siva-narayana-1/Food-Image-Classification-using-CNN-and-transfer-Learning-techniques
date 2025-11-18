@@ -18,7 +18,7 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 TFLITE_DIR = "tflite_models"
 os.makedirs(TFLITE_DIR, exist_ok=True)
 
-# Public Google Cloud bucket
+# Google Cloud Storage bucket
 GCS_BUCKET = "https://storage.googleapis.com/food-classification-models-bucket"
 
 # ===================================================================
@@ -70,90 +70,93 @@ RAW_MODEL_CLASS_INDEX = {
     "vgg_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3}
 }
 
+# Normalized
 MODEL_CLASS_INDEX = {
     m.lower(): {normalize(k): v for k, v in mapping.items()}
     for m, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
 # ===================================================================
-#  LOAD CLASS JSON + METRICS JSON
+#  LOAD CLASS LIST
 # ===================================================================
 
 CLASS_JSON = json.load(open("class.json"))
 CLASS_LIST = list(CLASS_JSON.keys())
 
+# ===================================================================
+#  LOAD METRIC JSONS (Normalize keys)
+# ===================================================================
+
 MODEL_EVAL_JSON = {
     "custom_model": json.load(open("model_evaluation_results.json")),
     "resnet_model": json.load(open("model_evaluation_results_resnet.json")),
-    "vgg_model": json.load(open("model_evaluation_results_vgg.json")),
+    "vgg_model": json.load(open("model_evaluation_results_vgg.json"))
 }
 
-# Normalize evaluation JSON keys
-for m, d in MODEL_EVAL_JSON.items():
-    MODEL_EVAL_JSON[m] = {normalize(k): v for k, v in d.items()}
+# convert keys to normalized form
+for mtype, data in MODEL_EVAL_JSON.items():
+    MODEL_EVAL_JSON[mtype] = {normalize(k): v for k, v in data.items()}
 
 # ===================================================================
-#  AUTO DOWNLOAD + CLEAN OLD FILES
+#  AUTO-DOWNLOAD TFLITE MODELS (ONLY 1 IN FOLDER)
 # ===================================================================
 
 tflite_cache = {}
 
-def clear_old_models():
-    """Ensure TFLITE_DIR contains ONLY ONE file."""
+def clear_tflite_folder():
     for f in os.listdir(TFLITE_DIR):
-        path = os.path.join(TFLITE_DIR, f)
-        try:
-            os.remove(path)
-        except:
-            pass
+        if f.endswith(".tflite"):
+            try:
+                os.remove(os.path.join(TFLITE_DIR, f))
+                print("[CLEAN] Removed old tflite:", f)
+            except:
+                pass
 
+def download_tflite_from_gcs(model_name):
+    """
+    Download model from Google Cloud Bucket → /tflite_models/
+    Only 1 tflite is kept at any time.
+    """
 
-def download_tflite(model_name):
-    """Download from Google Cloud into empty directory."""
-    clear_old_models()
+    # delete previous model
+    clear_tflite_folder()
 
     url = f"{GCS_BUCKET}/{model_name}.tflite"
     save_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
 
-    print(f"[INFO] Downloading: {url}")
+    print(f"[INFO] Downloading from GCS: {url}")
 
     try:
-        r = requests.get(url, timeout=30)
-        r.raise_for_status()
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
         with open(save_path, "wb") as f:
-            f.write(r.content)
+            f.write(resp.content)
         print(f"[INFO] Saved: {save_path}")
         return save_path
     except Exception as e:
-        print("[ERROR] Download failed:", e)
+        print(f"[ERROR] Download failed: {e}")
         return None
 
 
 def load_tflite_model(model_name):
-    """Ensure only ONE model in folder + ONE interpreter in memory."""
     global tflite_cache
 
-    if model_name not in tflite_cache:
-        tflite_cache = {}  # clear interpreter cache
-        clear_old_models()  # clear old files
+    # Wipe memory cache
+    tflite_cache = {}
 
-        model_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
+    model_path = os.path.join(TFLITE_DIR, model_name + ".tflite")
 
-        if not os.path.exists(model_path):
-            ok = download_tflite(model_name)
-            if ok is None:
-                return "DOWNLOAD_FAILED"
+    # Download if missing
+    if not os.path.exists(model_path):
+        ok = download_tflite_from_gcs(model_name)
+        if ok is None:
+            return None
 
-        try:
-            interpreter = tf.lite.Interpreter(model_path=model_path)
-            interpreter.allocate_tensors()
-        except Exception as e:
-            print("[ERROR] TFLite load failed:", e)
-            return "LOAD_FAILED"
+    interpreter = tf.lite.Interpreter(model_path=model_path)
+    interpreter.allocate_tensors()
+    tflite_cache[model_name] = interpreter
 
-        tflite_cache[model_name] = interpreter
-
-    return tflite_cache[model_name]
+    return interpreter
 
 # ===================================================================
 #  IMAGE PREPROCESS
@@ -183,58 +186,68 @@ def predict():
     fpath = os.path.join(app.config["UPLOAD_FOLDER"], fname)
     img_file.save(fpath)
 
-    model_type = request.form.get("model_type").lower()
-    selected_class = request.form.get("selected_class", "").strip()
-    cname = normalize(selected_class)
+    try:
+        model_type = request.form.get("model_type").lower()
+        selected_class = request.form.get("selected_class", "").strip()
+        cname = normalize(selected_class)
 
-    class_info = MODEL_EVAL_JSON[model_type].get(cname)
-    if class_info is None:
-        return jsonify({"success": False, "error": f"Class not in JSON: {cname}"})
+        class_info = MODEL_EVAL_JSON[model_type].get(cname)
+        if class_info is None:
+            return jsonify({"success": False, "error": f"class not in JSON: {cname}"})
 
-    model_used = class_info["model_used"].lower()
+        model_used = class_info["model_used"].lower()
 
-    interpreter = load_tflite_model(model_used)
-    if interpreter in ["DOWNLOAD_FAILED", "LOAD_FAILED"]:
-        return jsonify({"success": False, "error": "Model download/load failed"}), 500
+        interpreter = load_tflite_model(model_used)
+        if interpreter is None:
+            return jsonify({"success": False, "error": "Model download/load failed"})
 
-    input_info = interpreter.get_input_details()[0]
-    _, h, w, _ = input_info["shape"]
+        input_info = interpreter.get_input_details()[0]
+        _, h, w, _ = input_info["shape"]
 
-    img = Image.open(fpath).convert("RGB")
-    x = preprocess(img, w)
+        img = Image.open(fpath).convert("RGB")
+        x = preprocess(img, w)
 
-    interpreter.set_tensor(input_info["index"], x)
-    interpreter.invoke()
+        interpreter.set_tensor(input_info["index"], x)
+        interpreter.invoke()
 
-    output_info = interpreter.get_output_details()[0]
-    preds = interpreter.get_tensor(output_info["index"]).squeeze().astype(float)
-    preds = np.nan_to_num(preds)
+        output_info = interpreter.get_output_details()[0]
+        preds = interpreter.get_tensor(output_info["index"]).squeeze().astype(float)
+        preds = np.nan_to_num(preds)
 
-    idx = int(np.argmax(preds))
-    confidence = float(np.max(preds))
+        idx = int(np.argmax(preds))
+        confidence = float(np.max(preds))
 
-    class_map = MODEL_CLASS_INDEX[model_used]
-    predicted_label = next(k for k, v in class_map.items() if v == idx)
-    predicted_norm = normalize(predicted_label)
+        class_map = MODEL_CLASS_INDEX[model_used]
+        predicted_label = next(k for k, v in class_map.items() if v == idx)
+        predicted_norm = normalize(predicted_label)
 
-    predicted_info = MODEL_EVAL_JSON[model_type].get(predicted_norm, {})
+        predicted_info = MODEL_EVAL_JSON[model_type].get(predicted_norm, {})
 
-    labels = list(class_map.keys())
-    matrix = predicted_info.get("confusion_matrix_full", [])
+        labels = list(class_map.keys())
+        matrix = predicted_info.get("confusion_matrix_full", [])
 
-    return jsonify({
-        "success": True,
-        "selected_class": selected_class,
-        "predicted_label": predicted_label,
-        "confidence": confidence,
-        "accuracy": predicted_info.get("accuracy", "NA"),
-        "precision": predicted_info.get("precision", "NA"),
-        "recall": predicted_info.get("recall", "NA"),
-        "f1_score": predicted_info.get("f1_score", "NA"),
-        "confusion_matrix_labels": labels,
-        "confusion_matrix_full": matrix,
-        "model_used": model_used
-    })
+        return jsonify({
+            "success": True,
+            "selected_class": selected_class,
+            "predicted_label": predicted_label,
+            "confidence": confidence,
+            "accuracy": predicted_info.get("accuracy", "NA"),
+            "precision": predicted_info.get("precision", "NA"),
+            "recall": predicted_info.get("recall", "NA"),
+            "f1_score": predicted_info.get("f1_score", "NA"),
+            "confusion_matrix_labels": labels,
+            "confusion_matrix_full": matrix,
+            "model_used": model_used
+        })
+
+    finally:
+        # DELETE uploaded image ALWAYS
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+                print("[CLEANUP] Deleted uploaded file:", fpath)
+            except:
+                pass
 
 # ===================================================================
 #  MAIN
