@@ -1,13 +1,14 @@
 import os
 import json
 import numpy as np
+import requests
 from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 from PIL import Image
 import tensorflow as tf
 
 # ===================================================================
-#  APP SETUP
+#  APP INIT
 # ===================================================================
 
 app = Flask(__name__)
@@ -17,12 +18,13 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 TFLITE_DIR = "tflite_models"
 os.makedirs(TFLITE_DIR, exist_ok=True)
 
+GCS_BUCKET = "https://storage.googleapis.com/food-classification-models-bucket"
+
 # ===================================================================
 #  NORMALIZER
 # ===================================================================
 
 def normalize(x: str):
-    """Lowercase and replace spaces with underscores."""
     return x.lower().strip().replace(" ", "_")
 
 # ===================================================================
@@ -64,24 +66,24 @@ RAW_MODEL_CLASS_INDEX = {
     "vgg_model_8":  {'kulfi': 0, 'masala_dosa': 1, 'momos': 2},
     "vgg_model_9":  {'omelette': 0, 'paani_puri': 1, 'pakode': 2},
     "vgg_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
-    "vgg_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
+    "vgg_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3}
 }
 
-# Normalize mapping
+# Normalized
 MODEL_CLASS_INDEX = {
     m.lower(): {normalize(k): v for k, v in mapping.items()}
     for m, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
 # ===================================================================
-#  LOAD CLASSES
+#  LOAD CLASS LIST
 # ===================================================================
 
 CLASS_JSON = json.load(open("class.json"))
 CLASS_LIST = list(CLASS_JSON.keys())
 
 # ===================================================================
-#  LOAD METRICS JSON + NORMALIZE KEYS
+#  LOAD METRIC JSONS (Normalize keys)
 # ===================================================================
 
 MODEL_EVAL_JSON = {
@@ -90,32 +92,57 @@ MODEL_EVAL_JSON = {
     "vgg_model": json.load(open("model_evaluation_results_vgg.json"))
 }
 
-# Fix keys (lowercase + underscores)
-for model_type, content in MODEL_EVAL_JSON.items():
-    fixed = {}
-    for key, val in content.items():
-        fixed[normalize(key)] = val
-    MODEL_EVAL_JSON[model_type] = fixed
+# convert keys to normalized form
+for mtype, data in MODEL_EVAL_JSON.items():
+    MODEL_EVAL_JSON[mtype] = {normalize(k): v for k, v in data.items()}
 
 # ===================================================================
-#  TFLITE CACHING (ONLY 1 MODEL IN MEMORY)
+#  AUTO-DOWNLOAD TFLITE MODELS
 # ===================================================================
 
 tflite_cache = {}
 
+def download_tflite_from_gcs(model_name):
+    """
+    Download model from Google Cloud Bucket → /tflite_models/
+    """
+    url = f"{GCS_BUCKET}/{model_name}.tflite"
+    save_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
+
+    print(f"[INFO] Downloading from GCS: {url}")
+
+    try:
+        resp = requests.get(url, timeout=30)
+        resp.raise_for_status()
+        with open(save_path, "wb") as f:
+            f.write(resp.content)
+        print(f"[INFO] Saved: {save_path}")
+        return save_path
+    except Exception as e:
+        print(f"[ERROR] Download failed: {e}")
+        return None
+
+
 def load_tflite_model(model_name):
+    """
+    Load or download + cache only 1 model in memory.
+    """
+
     global tflite_cache
 
-    # Clear if loading a different model
+    # wipe cache if new model requested
     if model_name not in tflite_cache:
         tflite_cache = {}
-        path = os.path.join(TFLITE_DIR, model_name + ".tflite")
 
-        if not os.path.exists(path):
-            print("[ERROR] Missing TFLite file:", path)
-            return None
+        model_path = os.path.join(TFLITE_DIR, model_name + ".tflite")
 
-        interpreter = tf.lite.Interpreter(model_path=path)
+        # download from Google Cloud if missing
+        if not os.path.exists(model_path):
+            ok = download_tflite_from_gcs(model_name)
+            if ok is None:
+                return None
+
+        interpreter = tf.lite.Interpreter(model_path=model_path)
         interpreter.allocate_tensors()
         tflite_cache[model_name] = interpreter
 
@@ -146,42 +173,43 @@ def predict():
 
     img_file = request.files["file"]
     fname = secure_filename(img_file.filename)
-    file_path = os.path.join(app.config["UPLOAD_FOLDER"], fname)
-    img_file.save(file_path)
+    fpath = os.path.join(app.config["UPLOAD_FOLDER"], fname)
+    img_file.save(fpath)
 
     model_type = request.form.get("model_type").lower()
     selected_class = request.form.get("selected_class", "").strip()
     cname = normalize(selected_class)
 
-    # Load JSON metrics for selected class
+    # get class→model mapping from JSON evaluation file
     class_info = MODEL_EVAL_JSON[model_type].get(cname)
     if class_info is None:
-        return jsonify({"success": False, "error": "Class not found in JSON", "class_lookup": cname})
+        return jsonify({"success": False, "error": f"class not in JSON: {cname}"})
 
     model_used = class_info["model_used"].lower()
 
+    # Load model (auto download)
     interpreter = load_tflite_model(model_used)
     if interpreter is None:
-        return jsonify({"success": False, "error": "Model missing on server"})
+        return jsonify({"success": False, "error": "model download/load failed"})
 
     input_info = interpreter.get_input_details()[0]
     _, h, w, _ = input_info["shape"]
 
-    img = Image.open(file_path).convert("RGB")
+    img = Image.open(fpath).convert("RGB")
     x = preprocess(img, w)
 
     interpreter.set_tensor(input_info["index"], x)
     interpreter.invoke()
 
-    output = interpreter.get_output_details()[0]
-    preds = interpreter.get_tensor(output["index"]).squeeze().astype(float)
+    output_info = interpreter.get_output_details()[0]
+    preds = interpreter.get_tensor(output_info["index"]).squeeze().astype(float)
     preds = np.nan_to_num(preds)
 
     idx = int(np.argmax(preds))
     confidence = float(np.max(preds))
 
     class_map = MODEL_CLASS_INDEX[model_used]
-    predicted_label = next(key for key, val in class_map.items() if val == idx)
+    predicted_label = next(k for k, v in class_map.items() if v == idx)
     predicted_label_norm = normalize(predicted_label)
 
     predicted_info = MODEL_EVAL_JSON[model_type].get(predicted_label_norm, {})
@@ -199,10 +227,6 @@ def predict():
         "precision": predicted_info.get("precision", "NA"),
         "recall": predicted_info.get("recall", "NA"),
         "f1_score": predicted_info.get("f1_score", "NA"),
-        "true_positive": predicted_info.get("true_positive", "NA"),
-        "false_positive": predicted_info.get("false_positive", "NA"),
-        "false_negative": predicted_info.get("false_negative", "NA"),
-        "true_negative": predicted_info.get("true_negative", "NA"),
 
         "confusion_matrix_labels": labels,
         "confusion_matrix_full": matrix,
