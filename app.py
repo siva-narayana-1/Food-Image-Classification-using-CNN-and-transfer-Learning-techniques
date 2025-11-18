@@ -4,7 +4,7 @@ import json
 import zipfile
 import requests
 import numpy as np
-from flask import Flask, render_template, request, jsonify, send_from_directory
+from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 from PIL import Image
 import cv2
@@ -12,14 +12,14 @@ import cv2
 from tensorflow.keras.models import load_model
 from tensorflow.nn import softmax
 
+
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 
-
 # ==========================================================================================
-#                         GOOGLE DRIVE DIRECT DOWNLOAD ZIP LINKS
+#                         GOOGLE DRIVE DIRECT DOWNLOAD ZIP LINKS (FINAL)
 # ==========================================================================================
 
 GOOGLE_DRIVE_LINKS = {
@@ -38,7 +38,6 @@ for d in MODEL_DIRS.values():
     os.makedirs(d, exist_ok=True)
 
 
-
 # ==========================================================================================
 #                       DOWNLOAD & EXTRACT ZIP FILE IF NOT PRESENT
 # ==========================================================================================
@@ -47,22 +46,23 @@ def download_and_extract_if_needed(model_type):
     folder = MODEL_DIRS[model_type]
     url = GOOGLE_DRIVE_LINKS[model_type]
 
+    # Skip if models already exist
     if any(f.endswith(".h5") for f in os.listdir(folder)):
-        print(f"[INFO] {model_type} models already downloaded.")
+        print(f"[INFO] {model_type} models already present. Skipping download.")
         return
 
-    print(f"[INFO] Downloading {model_type} models...")
+    print(f"[INFO] Downloading {model_type} models from Google Drive...")
 
     try:
         response = requests.get(url, allow_redirects=True)
     except Exception as e:
-        print(f"[ERROR] Failed to download {model_type}: {e}")
+        print(f"[ERROR] Download failed for {model_type}: {e}")
         return
 
     try:
         with zipfile.ZipFile(io.BytesIO(response.content)) as z:
             z.extractall(folder)
-        print(f"[INFO] Extracted {model_type} models.")
+        print(f"[INFO] Extracted {model_type} models successfully.")
     except Exception as e:
         print(f"[ERROR] ZIP extraction failed for {model_type}: {e}")
 
@@ -70,7 +70,6 @@ def download_and_extract_if_needed(model_type):
 download_and_extract_if_needed("custom")
 download_and_extract_if_needed("resnet")
 download_and_extract_if_needed("vgg")
-
 
 
 # ==========================================================================================
@@ -88,11 +87,13 @@ def normalize(name):
     return name.lower().replace(" ", "_")
 
 
+# ==========================================================================================
+#                       FULL MODEL–CLASS INDEX MAPPING
+# ==========================================================================================
 
-# FULL MODEL-CLASS INDEX (COMPLETE — NO PLACEHOLDERS)
 RAW_MODEL_CLASS_INDEX = {
 
-    # CUSTOM MODELS
+    # ---------------- CUSTOM MODELS ----------------
     "custom_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "custom_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "custom_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -105,7 +106,7 @@ RAW_MODEL_CLASS_INDEX = {
     "custom_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "custom_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # RESNET MODELS
+    # ---------------- RESNET MODELS ----------------
     "resnet_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "resnet_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "resnet_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -118,7 +119,7 @@ RAW_MODEL_CLASS_INDEX = {
     "resnet_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "resnet_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # VGG MODELS
+    # ---------------- VGG MODELS ----------------
     "vgg_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "vgg_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "vgg_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -133,17 +134,16 @@ RAW_MODEL_CLASS_INDEX = {
 }
 
 
-# Normalize
+# Normalize mapping
 RAW_MODEL_CLASS_INDEX = {
-    m: {normalize(cls): idx for cls, idx in mapping.items()}
-    for m, mapping in RAW_MODEL_CLASS_INDEX.items()
+    model: {normalize(cls): idx for cls, idx in mapping.items()}
+    for model, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
 MODEL_CLASS_INDEX = {m.lower(): v for m, v in RAW_MODEL_CLASS_INDEX.items()}
 
 CLASS_NAMES = json.load(open(CLASS_NAMES_FILE))
 CLASS_LIST = list(CLASS_NAMES.keys())
-
 
 
 # ==========================================================================================
@@ -175,7 +175,6 @@ def get_model_path(model_type, model_used):
     return None
 
 
-
 # ==========================================================================================
 #                                 MODEL CACHE
 # ==========================================================================================
@@ -189,7 +188,6 @@ def load_model_cached(path):
     return _model_cache[path]
 
 
-
 # ==========================================================================================
 #                              IMAGE PREPROCESSING
 # ==========================================================================================
@@ -199,7 +197,6 @@ def preprocess_dynamic(img, w, h):
     img = cv2.resize(img, (w, h))
     img = np.expand_dims(img, 0).astype("float32") / 255.0
     return img
-
 
 
 # ==========================================================================================
@@ -236,6 +233,7 @@ def predict():
     if not model_path:
         return jsonify({"success": False, "error": "Model file missing"})
 
+
     model = load_model_cached(model_path)
 
     _, h, w, _ = model.input_shape
@@ -258,9 +256,8 @@ def predict():
     })
 
 
-
 # ==========================================================================================
-#                                     MAIN
+#                                      MAIN
 # ==========================================================================================
 
 if __name__ == "__main__":
