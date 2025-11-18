@@ -18,62 +18,67 @@ app.config['UPLOAD_FOLDER'] = 'uploads'
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 
-
 # ==========================================================================================
-#                                  ONEDRIVE MODEL DOWNLOADERS
+#                              ONEDRIVE MODEL DOWNLOAD (ZIP FILE LINKS)
 # ==========================================================================================
 
-# OneDrive ZIP download links (you provided)
 ONEDRIVE_LINKS = {
-    "vgg": "https://npt3-my.sharepoint.com/:f:/g/personal/siva_madhala_npt3_onmicrosoft_com/IgCLf0rCY4a2QavioclHqmECASGCCycM8KvSlaTZKDRFBtI?download=1",
-    "resnet": "https://npt3-my.sharepoint.com/:f:/g/personal/siva_madhala_npt3_onmicrosoft_com/IgAbrOYbCICQRK0uAngCoubbAUC6BzLnQ0ghOG9oG5iA4ms?download=1",
-    "custom": "https://npt3-my.sharepoint.com/:f:/g/personal/siva_madhala_npt3_onmicrosoft_com/IgDvuD8cwlrPRof3kooITeiBAaM6XAwQrMHmwxTqUEpVQW8?download=1"
+    "vgg": "https://npt3-my.sharepoint.com/:u:/g/personal/siva_madhala_npt3_onmicrosoft_com/IQCY-eAfpvtOQbl5AsNqoXhCASQek13PeHkzKl1e_PkMUN4?e=ncUQf1",
+    "resnet": "https://npt3-my.sharepoint.com/:u:/g/personal/siva_madhala_npt3_onmicrosoft_com/IQCRrvHZOZNQRI9PWUY1m13UAWOcAPBGYNr5nI3J4YaTVsU?e=01YX6h",
+    "custom": "https://npt3-my.sharepoint.com/:u:/g/personal/siva_madhala_npt3_onmicrosoft_com/IQA3_27GeetPRrHniHO3XmP8AY91Ya-SmrlUVZPkjedSEEM?e=bb8tnP"
 }
 
-# Local storage folders
 MODEL_DIRS = {
     "vgg": "vgg_models",
     "resnet": "Resnet_models",
     "custom": "custom_models"
 }
 
-# Create model directories
+# Create folders if not exist
 for d in MODEL_DIRS.values():
     os.makedirs(d, exist_ok=True)
 
 
 def download_and_extract_if_needed(model_type):
     """
-    Auto-downloads and extracts models from OneDrive if not present.
+    Downloads ZIP from OneDrive and extracts all .h5 files.
+    Works with direct file URLs (your :u:/ links).
     """
     folder = MODEL_DIRS[model_type]
 
-    # If models already extracted → skip
-    if any(fname.endswith(".h5") for fname in os.listdir(folder)):
-        print(f"[INFO] {model_type} models found locally. Skipping download.")
+    # Skip if already downloaded
+    if any(f.endswith(".h5") for f in os.listdir(folder)):
+        print(f"[INFO] {model_type} models already exist, skipping download.")
         return
-
-    print(f"[INFO] Downloading {model_type} models from OneDrive...")
 
     url = ONEDRIVE_LINKS[model_type]
-    response = requests.get(url)
+    print(f"[INFO] Downloading {model_type} models from OneDrive...")
 
-    if response.status_code != 200:
-        print(f"[ERROR] Failed downloading {model_type} models. Status: {response.status_code}")
+    try:
+        response = requests.get(url, allow_redirects=True)
+    except Exception as e:
+        print(f"[ERROR] Failed to download {model_type}: {e}")
         return
 
-    # Extract ZIP file
-    with zipfile.ZipFile(io.BytesIO(response.content)) as z:
-        z.extractall(folder)
+    # If OneDrive returns HTML instead of ZIP
+    if "text/html" in response.headers.get("Content-Type", ""):
+        print(f"[ERROR] OneDrive returned HTML instead of ZIP for {model_type}.")
+        return
 
-    print(f"[INFO] Extracted {model_type} models successfully.")
+    try:
+        with zipfile.ZipFile(io.BytesIO(response.content)) as z:
+            z.extractall(folder)
+            print(f"[INFO] Extracted {model_type} models successfully.")
+    except zipfile.BadZipFile:
+        print(f"[ERROR] Invalid ZIP for {model_type}. Check link.")
+    except Exception as e:
+        print(f"[ERROR] Extraction failed for {model_type}: {e}")
 
 
-# Download all model sets (only once)
+# Download all model sets (only on first boot)
 download_and_extract_if_needed("vgg")
 download_and_extract_if_needed("resnet")
 download_and_extract_if_needed("custom")
-
 
 
 # ==========================================================================================
@@ -87,15 +92,11 @@ VGG_JSON_FILE = 'model_evaluation_results_vgg.json'
 
 NUTRITION_JSON = json.load(open("class.json", "r"))
 
-
-# Normalize class names
 def normalize(name):
     return name.lower().replace(" ", "_")
 
-
-# MASTER Model → Class-index mapping
+# FULL CLASS-MODEL MAPPING (unchanged)
 RAW_MODEL_CLASS_INDEX = {
-    # CUSTOM MODELS ------------------------------
     "custom_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "custom_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "custom_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -108,7 +109,6 @@ RAW_MODEL_CLASS_INDEX = {
     "custom_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "custom_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # RESNET MODELS ------------------------------
     "resnet_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "resnet_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "resnet_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -121,7 +121,6 @@ RAW_MODEL_CLASS_INDEX = {
     "resnet_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "resnet_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # VGG MODELS ------------------------------
     "vgg_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "vgg_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "vgg_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -135,9 +134,8 @@ RAW_MODEL_CLASS_INDEX = {
     "vgg_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3}
 }
 
-# Normalize
 RAW_MODEL_CLASS_INDEX = {
-    m: {normalize(cls): i for cls, i in mapping.items()}
+    m: {normalize(c): i for c, i in mapping.items()}
     for m, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
@@ -147,9 +145,8 @@ CLASS_NAMES = json.load(open(CLASS_NAMES_FILE))
 CLASS_LIST = list(CLASS_NAMES.keys())
 
 
-
 # ==========================================================================================
-#                                 MODEL JSON HELPERS
+#                                JSON LOAD HELPERS
 # ==========================================================================================
 
 def load_eval_json(model_type):
@@ -170,9 +167,8 @@ def find_model_from_json(eval_json, classname):
     return None, None
 
 
-
 # ==========================================================================================
-#                                   MODEL FILE LOCATOR
+#                            MODEL FILE LOCATOR + LOADER
 # ==========================================================================================
 
 def get_model_path(model_type, model_used):
@@ -190,10 +186,6 @@ def get_model_path(model_type, model_used):
     return None
 
 
-# ==========================================================================================
-#                                      MODEL CACHE
-# ==========================================================================================
-
 _model_cache = {}
 
 def load_model_cached(path):
@@ -203,9 +195,8 @@ def load_model_cached(path):
     return _model_cache[path]
 
 
-
 # ==========================================================================================
-#                                  IMAGE PREPROCESSING
+#                                IMAGE PREPROCESSING
 # ==========================================================================================
 
 def preprocess_dynamic(img, w, h):
@@ -223,7 +214,6 @@ def get_class_from_index(model_used, idx):
     return None
 
 
-
 # ==========================================================================================
 #                                      ROUTES
 # ==========================================================================================
@@ -232,11 +222,6 @@ def get_class_from_index(model_used, idx):
 def index():
     return render_template("index.html", classes=CLASS_LIST)
 
-
-
-# ==========================================================================================
-#                                      PREDICT API
-# ==========================================================================================
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -254,29 +239,24 @@ def predict():
     filepath = os.path.join(app.config["UPLOAD_FOLDER"], secure_filename(file.filename))
     file.save(filepath)
 
-    # Load correct JSON for model type
     eval_json = load_eval_json(model_type)
 
-    # Find correct model for selected class
     model_used, class_entry = find_model_from_json(eval_json, selected_class)
     if not model_used:
-        return jsonify({"success": False, "error": f"No {model_type} model for this class"})
+        return jsonify({"success": False, "error": f"No {model_type} model found for this class"})
 
     model_used = model_used.lower()
     model_path = get_model_path(model_type, model_used)
 
     if not model_path:
-        return jsonify({"success": False, "error": f"Model missing: {model_used}"})
+        return jsonify({"success": False, "error": f"Model file missing: {model_used}"})
 
-    # Load model
     model = load_model_cached(model_path)
 
-    # Preprocess image
     _, h, w, _ = model.input_shape
     img = Image.open(filepath)
     x = preprocess_dynamic(img, w, h)
 
-    # Predict
     pred = model.predict(x).squeeze()
     pred = softmax(pred).numpy() if np.sum(pred) == 0 else pred
 
@@ -286,7 +266,6 @@ def predict():
 
     nutrition = NUTRITION_JSON.get(normalize(selected_class), {})
 
-    # Additional evaluation info
     confusion_matrix_full = class_entry.get("confusion_matrix_full")
     model_labels_order = list(MODEL_CLASS_INDEX.get(model_used.lower(), {}).keys())
 
@@ -304,11 +283,9 @@ def predict():
     })
 
 
-
 @app.route("/uploads/<path:filename>")
 def uploads(filename):
     return send_from_directory(app.config['UPLOAD_FOLDER'], filename)
-
 
 
 if __name__ == "__main__":
