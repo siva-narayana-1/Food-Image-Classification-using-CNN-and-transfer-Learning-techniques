@@ -19,12 +19,11 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 TFLITE_DIR = "tflite_models"
 os.makedirs(TFLITE_DIR, exist_ok=True)
 
-# Google Storage (Custom + VGG models)
+# Google Cloud for custom + VGG models
 GCS_BUCKET = "https://storage.googleapis.com/food-classification-models-bucket"
 
-# External ResNet API
+# ResNet backend API
 RESNET_API_URL = "https://web-production-ba634.up.railway.app/predict"
-
 
 # ===================================================================
 #  NORMALIZER
@@ -33,13 +32,11 @@ RESNET_API_URL = "https://web-production-ba634.up.railway.app/predict"
 def normalize(x: str):
     return x.lower().strip().replace(" ", "_")
 
-
 # ===================================================================
-#  CLASS–MODEL INDEX
+#  MODEL → CLASS INDEX (Custom + VGG)
 # ===================================================================
 
 RAW_MODEL_CLASS_INDEX = {
-    # CUSTOM MODELS
     "custom_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "custom_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "custom_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -52,7 +49,6 @@ RAW_MODEL_CLASS_INDEX = {
     "custom_model_10": {'pav_bhaji': 0, 'pizza': 1, 'samosa': 2},
     "custom_model_11": {'sandwich': 0, 'sushi': 1, 'taco': 2, 'taquito': 3},
 
-    # VGG MODELS
     "vgg_model_1":  {'apple_pie': 0, 'baked_potato': 1, 'burger': 2},
     "vgg_model_2":  {'butter_naan': 0, 'chai': 1, 'chapati': 2},
     "vgg_model_3":  {'cheesecake': 0, 'chicken_curry': 1, 'chole_bhature': 2},
@@ -71,7 +67,6 @@ MODEL_CLASS_INDEX = {
     for m, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
-
 # ===================================================================
 #  CLASS JSON
 # ===================================================================
@@ -79,9 +74,8 @@ MODEL_CLASS_INDEX = {
 CLASS_JSON = json.load(open("class.json"))
 CLASS_LIST = list(CLASS_JSON.keys())
 
-
 # ===================================================================
-# METRICS JSON — Custom + VGG only
+#  MODEL METRICS — Only Custom + VGG
 # ===================================================================
 
 MODEL_EVAL_JSON = {
@@ -92,13 +86,11 @@ MODEL_EVAL_JSON = {
 for mtype, data in MODEL_EVAL_JSON.items():
     MODEL_EVAL_JSON[mtype] = {normalize(k): v for k, v in data.items()}
 
-
 # ===================================================================
-#  TFLITE LOADING (1 model only)
+#  TFLITE LOADING — only one model at a time
 # ===================================================================
 
 tflite_cache = {}
-
 
 def clear_tflite_folder():
     for f in os.listdir(TFLITE_DIR):
@@ -108,10 +100,8 @@ def clear_tflite_folder():
             except:
                 pass
 
-
 def download_tflite_from_gcs(model_name):
     clear_tflite_folder()
-
     url = f"{GCS_BUCKET}/{model_name}.tflite"
     save_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
 
@@ -124,13 +114,11 @@ def download_tflite_from_gcs(model_name):
     except:
         return None
 
-
 def load_tflite_model(model_name):
     global tflite_cache
     tflite_cache = {}
 
-    model_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
-
+    model_path = os.path.join(TFLITE_DIR, model_name + ".tflite")
     if not os.path.exists(model_path):
         ok = download_tflite_from_gcs(model_name)
         if ok is None:
@@ -141,7 +129,6 @@ def load_tflite_model(model_name):
     tflite_cache[model_name] = interpreter
     return interpreter
 
-
 # ===================================================================
 #  IMAGE PREPROCESS
 # ===================================================================
@@ -151,7 +138,6 @@ def preprocess(img, size):
     arr = np.array(img).astype("float32") / 255.0
     return np.expand_dims(arr, 0)
 
-
 # ===================================================================
 #  ROUTES
 # ===================================================================
@@ -160,11 +146,10 @@ def preprocess(img, size):
 def index():
     return render_template("index.html", classes=CLASS_LIST)
 
-
 @app.route("/predict", methods=["POST"])
 def predict():
     if "file" not in request.files:
-        return jsonify({"success": False, "error": "No image uploaded"})
+        return jsonify({"success": False, "error": "No file uploaded"})
 
     img_file = request.files["file"]
     fname = secure_filename(img_file.filename)
@@ -177,7 +162,7 @@ def predict():
         cname = normalize(selected_class)
 
         # ======================================================
-        # 🔥 RESNET — external API + retry + metrics extraction
+        # ⭐ EXTERNAL RESNET API
         # ======================================================
         if model_type == "resnet_model":
 
@@ -198,21 +183,30 @@ def predict():
                     continue
 
                 if resp.status_code in (502, 503):
-                    print("Server cold start, waiting 90 sec...")
+                    print("ResNet API cold start → waiting 90 sec...")
                     time.sleep(90)
                     continue
 
                 if resp.status_code == 200:
                     res = resp.json()
                     metrics = res.get("metrics", {})
+                    resnet_model_used = res.get("model_used")  # e.g. resnet_model_3
 
-                    # ⭐ return in the SAME STRUCTURE as custom/vgg
+                    # ----------------------------------------------------------
+                    # ⭐ CONFUSION LABELS FROM MATCHING VGG MODEL
+                    # ----------------------------------------------------------
+                    model_num = resnet_model_used.split("_")[-1]
+                    vgg_model_name = f"vgg_model_{model_num}".lower()
+
+                    confusion_labels = list(MODEL_CLASS_INDEX[vgg_model_name].keys())
+
+                    # Final unified JSON response
                     return jsonify({
                         "success": True,
                         "selected_class": selected_class,
                         "predicted_label": res.get("predicted_label"),
                         "confidence": res.get("confidence"),
-                        "model_used": res.get("model_used"),
+                        "model_used": resnet_model_used,
 
                         "accuracy": metrics.get("accuracy", "NA"),
                         "precision": metrics.get("precision", "NA"),
@@ -224,29 +218,29 @@ def predict():
                         "false_negative": metrics.get("false_negative", "NA"),
                         "true_negative": metrics.get("true_negative", "NA"),
 
-                        "confusion_matrix_labels": [],  # ResNet API does not send labels
+                        "confusion_matrix_labels": confusion_labels,
                         "confusion_matrix_full": metrics.get("confusion_matrix_full", [])
                     })
 
                 time.sleep(90)
 
-            return jsonify({"success": False, "error": "ResNet failed after 3 retries"})
+            return jsonify({"success": False, "error": "ResNet failed after retries"})
 
         # ======================================================
-        # CUSTOM & VGG — LOCAL TFLITE
+        # ⭐ LOCAL — CUSTOM / VGG MODELS
         # ======================================================
         if model_type not in MODEL_EVAL_JSON:
             return jsonify({"success": False, "error": f"Invalid model_type {model_type}"}), 400
 
         class_info = MODEL_EVAL_JSON[model_type].get(cname)
         if class_info is None:
-            return jsonify({"success": False, "error": f"Class not found in JSON: {cname}"}), 400
+            return jsonify({"success": False, "error": f"Class not found: {cname}"}), 400
 
         model_used = class_info["model_used"].lower()
 
         interpreter = load_tflite_model(model_used)
         if interpreter is None:
-            return jsonify({"success": False, "error": "Model failed to load"}), 500
+            return jsonify({"success": False, "error": "TFLite load failed"}), 500
 
         input_info = interpreter.get_input_details()[0]
         _, h, w, _ = input_info["shape"]
@@ -295,7 +289,6 @@ def predict():
                 os.remove(fpath)
             except:
                 pass
-
 
 # ===================================================================
 #  MAIN
