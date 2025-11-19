@@ -19,21 +19,23 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 TFLITE_DIR = "tflite_models"
 os.makedirs(TFLITE_DIR, exist_ok=True)
 
-# Google Cloud for Custom + VGG models
+# Google Storage (Custom + VGG models)
 GCS_BUCKET = "https://storage.googleapis.com/food-classification-models-bucket"
 
-# ResNet API Backend (Stored in another Render project)
+# External ResNet API
 RESNET_API_URL = "https://web-production-ba634.up.railway.app/predict"
 
+
 # ===================================================================
-#  NORMALIZE STRINGS
+#  NORMALIZER
 # ===================================================================
 
 def normalize(x: str):
     return x.lower().strip().replace(" ", "_")
 
+
 # ===================================================================
-#  MODEL → CLASS MAPPING (Custom + VGG)
+#  CLASS–MODEL INDEX
 # ===================================================================
 
 RAW_MODEL_CLASS_INDEX = {
@@ -69,6 +71,7 @@ MODEL_CLASS_INDEX = {
     for m, mapping in RAW_MODEL_CLASS_INDEX.items()
 }
 
+
 # ===================================================================
 #  CLASS JSON
 # ===================================================================
@@ -76,8 +79,9 @@ MODEL_CLASS_INDEX = {
 CLASS_JSON = json.load(open("class.json"))
 CLASS_LIST = list(CLASS_JSON.keys())
 
+
 # ===================================================================
-#  METRIC JSON (Custom + VGG)
+# METRICS JSON — Custom + VGG only
 # ===================================================================
 
 MODEL_EVAL_JSON = {
@@ -88,11 +92,13 @@ MODEL_EVAL_JSON = {
 for mtype, data in MODEL_EVAL_JSON.items():
     MODEL_EVAL_JSON[mtype] = {normalize(k): v for k, v in data.items()}
 
+
 # ===================================================================
-#  TFLITE HANDLING (ONLY ONE MODEL KEPT)
+#  TFLITE LOADING (1 model only)
 # ===================================================================
 
 tflite_cache = {}
+
 
 def clear_tflite_folder():
     for f in os.listdir(TFLITE_DIR):
@@ -101,6 +107,7 @@ def clear_tflite_folder():
                 os.remove(os.path.join(TFLITE_DIR, f))
             except:
                 pass
+
 
 def download_tflite_from_gcs(model_name):
     clear_tflite_folder()
@@ -116,6 +123,7 @@ def download_tflite_from_gcs(model_name):
         return save_path
     except:
         return None
+
 
 def load_tflite_model(model_name):
     global tflite_cache
@@ -133,6 +141,7 @@ def load_tflite_model(model_name):
     tflite_cache[model_name] = interpreter
     return interpreter
 
+
 # ===================================================================
 #  IMAGE PREPROCESS
 # ===================================================================
@@ -142,6 +151,7 @@ def preprocess(img, size):
     arr = np.array(img).astype("float32") / 255.0
     return np.expand_dims(arr, 0)
 
+
 # ===================================================================
 #  ROUTES
 # ===================================================================
@@ -149,6 +159,7 @@ def preprocess(img, size):
 @app.route("/")
 def index():
     return render_template("index.html", classes=CLASS_LIST)
+
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -162,71 +173,80 @@ def predict():
 
     try:
         model_type = request.form.get("model_type", "").lower()
-        selected_class = request.form.get("selected_class", "").strip()
+        selected_class = request.form.get("selected_class", "")
         cname = normalize(selected_class)
 
         # ======================================================
-        # 🔥 RESNET → EXTERNAL API WITH 90 SECOND WAIT
+        # 🔥 RESNET — external API + retry + metrics extraction
         # ======================================================
         if model_type == "resnet_model":
 
             for attempt in range(3):
-                print(f"\n[ResNet] Attempt {attempt+1}/3 sending request...")
+                print(f"[ResNet] Attempt {attempt+1}/3")
 
                 try:
                     with open(fpath, "rb") as f:
                         resp = requests.post(
                             RESNET_API_URL,
                             files={"file": (fname, f, img_file.mimetype)},
-                            data={"model_type": model_type,
-                                  "selected_class": selected_class},
+                            data={"selected_class": selected_class},
                             timeout=200
                         )
                 except Exception as e:
-                    print("[ResNet] Network error:", e)
-                    print("[ResNet] Waiting 90 sec before retry...")
+                    print("Network error:", e)
                     time.sleep(90)
                     continue
 
-                # If server is waking up → 503
-                if resp.status_code == 503:
-                    print("[ResNet] API cold start → Waiting 90 sec...")
+                if resp.status_code in (502, 503):
+                    print("Server cold start, waiting 90 sec...")
                     time.sleep(90)
                     continue
 
                 if resp.status_code == 200:
-                    try:
-                        return jsonify(resp.json())
-                    except:
-                        return jsonify({
-                            "success": False,
-                            "error": "ResNet API returned invalid JSON format"
-                        }), 502
+                    res = resp.json()
+                    metrics = res.get("metrics", {})
 
-                print(f"[ResNet] Server error: {resp.status_code}")
-                print("[ResNet] Waiting 90 sec...")
+                    # ⭐ return in the SAME STRUCTURE as custom/vgg
+                    return jsonify({
+                        "success": True,
+                        "selected_class": selected_class,
+                        "predicted_label": res.get("predicted_label"),
+                        "confidence": res.get("confidence"),
+                        "model_used": res.get("model_used"),
+
+                        "accuracy": metrics.get("accuracy", "NA"),
+                        "precision": metrics.get("precision", "NA"),
+                        "recall": metrics.get("recall", "NA"),
+                        "f1_score": metrics.get("f1_score", "NA"),
+
+                        "true_positive": metrics.get("true_positive", "NA"),
+                        "false_positive": metrics.get("false_positive", "NA"),
+                        "false_negative": metrics.get("false_negative", "NA"),
+                        "true_negative": metrics.get("true_negative", "NA"),
+
+                        "confusion_matrix_labels": [],  # ResNet API does not send labels
+                        "confusion_matrix_full": metrics.get("confusion_matrix_full", [])
+                    })
+
                 time.sleep(90)
 
-            return jsonify({
-                "success": False,
-                "error": "ResNet API failed after 3 attempts"
-            }), 502
+            return jsonify({"success": False, "error": "ResNet failed after 3 retries"})
 
         # ======================================================
-        # CUSTOM + VGG → LOCAL TFLITE INFERENCE
+        # CUSTOM & VGG — LOCAL TFLITE
         # ======================================================
         if model_type not in MODEL_EVAL_JSON:
-            return jsonify({"success": False, "error": f"Invalid model_type: {model_type}"}), 400
+            return jsonify({"success": False, "error": f"Invalid model_type {model_type}"}), 400
 
         class_info = MODEL_EVAL_JSON[model_type].get(cname)
         if class_info is None:
-            return jsonify({"success": False, "error": f"Class not found: {cname}"}), 400
+            return jsonify({"success": False, "error": f"Class not found in JSON: {cname}"}), 400
 
         model_used = class_info["model_used"].lower()
 
         interpreter = load_tflite_model(model_used)
         if interpreter is None:
-            return jsonify({"success": False, "error": "Failed to load model"}), 500
+            return jsonify({"success": False, "error": "Model failed to load"}), 500
 
         input_info = interpreter.get_input_details()[0]
         _, h, w, _ = input_info["shape"]
@@ -257,12 +277,15 @@ def predict():
             "selected_class": selected_class,
             "predicted_label": predicted_label,
             "confidence": confidence,
+
             "accuracy": predicted_info.get("accuracy", "NA"),
             "precision": predicted_info.get("precision", "NA"),
             "recall": predicted_info.get("recall", "NA"),
             "f1_score": predicted_info.get("f1_score", "NA"),
+
             "confusion_matrix_labels": labels,
             "confusion_matrix_full": matrix,
+
             "model_used": model_used
         })
 
@@ -273,10 +296,10 @@ def predict():
             except:
                 pass
 
+
 # ===================================================================
 #  MAIN
 # ===================================================================
 
 if __name__ == "__main__":
     app.run(debug=True)
-
