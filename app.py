@@ -6,9 +6,10 @@ from flask import Flask, render_template, request, jsonify
 from werkzeug.utils import secure_filename
 from PIL import Image
 import tensorflow as tf
+import time
 
 # ===================================================================
-# APP INIT
+#  APP INIT
 # ===================================================================
 
 app = Flask(__name__)
@@ -18,21 +19,21 @@ os.makedirs(app.config["UPLOAD_FOLDER"], exist_ok=True)
 TFLITE_DIR = "tflite_models"
 os.makedirs(TFLITE_DIR, exist_ok=True)
 
-# Google Cloud Storage bucket
+# Google Cloud for Custom + VGG models
 GCS_BUCKET = "https://storage.googleapis.com/food-classification-models-bucket"
 
-# External ResNet API
+# ResNet API Backend (Stored in another Render project)
 RESNET_API_URL = "https://resnet-api-creation.onrender.com/predict"
 
 # ===================================================================
-# NORMALIZER
+#  NORMALIZE STRINGS
 # ===================================================================
 
 def normalize(x: str):
     return x.lower().strip().replace(" ", "_")
 
 # ===================================================================
-# MODEL → CLASS INDEX MAPPING  (Custom + VGG only here)
+#  MODEL → CLASS MAPPING (Custom + VGG)
 # ===================================================================
 
 RAW_MODEL_CLASS_INDEX = {
@@ -69,14 +70,14 @@ MODEL_CLASS_INDEX = {
 }
 
 # ===================================================================
-# LOAD CLASSES
+#  CLASS JSON
 # ===================================================================
 
 CLASS_JSON = json.load(open("class.json"))
 CLASS_LIST = list(CLASS_JSON.keys())
 
 # ===================================================================
-# LOAD METRICS JSON (Custom + VGG only)
+#  METRIC JSON (Custom + VGG)
 # ===================================================================
 
 MODEL_EVAL_JSON = {
@@ -84,51 +85,43 @@ MODEL_EVAL_JSON = {
     "vgg_model": json.load(open("model_evaluation_results_vgg.json")),
 }
 
-# Normalize keys
 for mtype, data in MODEL_EVAL_JSON.items():
     MODEL_EVAL_JSON[mtype] = {normalize(k): v for k, v in data.items()}
 
 # ===================================================================
-# TFLITE DOWNLOAD & CACHE (1 FILE ONLY)
+#  TFLITE HANDLING (ONLY ONE MODEL KEPT)
 # ===================================================================
 
 tflite_cache = {}
 
 def clear_tflite_folder():
-    """Keep only one .tflite file to avoid storage issues."""
     for f in os.listdir(TFLITE_DIR):
         if f.endswith(".tflite"):
             try:
                 os.remove(os.path.join(TFLITE_DIR, f))
-                print("[CLEAN] Removed old tflite:", f)
             except:
                 pass
 
-def download_tflite_from_gcs(model_name: str):
+def download_tflite_from_gcs(model_name):
     clear_tflite_folder()
 
     url = f"{GCS_BUCKET}/{model_name}.tflite"
     save_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
 
-    print(f"[INFO] Downloading from GCS: {url}")
-
     try:
-        resp = requests.get(url, timeout=60)
+        resp = requests.get(url, timeout=120)
         resp.raise_for_status()
         with open(save_path, "wb") as f:
             f.write(resp.content)
-        print(f"[INFO] Saved: {save_path}")
         return save_path
-    except Exception as e:
-        print("[ERROR] Download failed:", e)
+    except:
         return None
 
-def load_tflite_model(model_name: str):
-    """Load only one model at a time."""
+def load_tflite_model(model_name):
     global tflite_cache
-    tflite_cache = {}  # always clear memory cache
+    tflite_cache = {}
 
-    model_path = os.path.join(TFLITE_DIR, model_name + ".tflite")
+    model_path = os.path.join(TFLITE_DIR, f"{model_name}.tflite")
 
     if not os.path.exists(model_path):
         ok = download_tflite_from_gcs(model_name)
@@ -141,22 +134,21 @@ def load_tflite_model(model_name: str):
     return interpreter
 
 # ===================================================================
-# IMAGE PREPROCESS
+#  IMAGE PREPROCESS
 # ===================================================================
 
-def preprocess(img: Image.Image, size: int):
+def preprocess(img, size):
     img = img.resize((size, size))
     arr = np.array(img).astype("float32") / 255.0
     return np.expand_dims(arr, 0)
 
 # ===================================================================
-# ROUTES
+#  ROUTES
 # ===================================================================
 
 @app.route("/")
 def index():
     return render_template("index.html", classes=CLASS_LIST)
-
 
 @app.route("/predict", methods=["POST"])
 def predict():
@@ -174,63 +166,67 @@ def predict():
         cname = normalize(selected_class)
 
         # ======================================================
-        # 1) RESNET → Forward to external API
+        # 🔥 RESNET → EXTERNAL API WITH 90 SECOND WAIT
         # ======================================================
         if model_type == "resnet_model":
-            try:
-                with open(fpath, "rb") as f:
-                    files = {"file": (fname, f, img_file.mimetype)}
-                    data = {"model_type": model_type, "selected_class": selected_class}
 
-                    resp = requests.post(
-                        RESNET_API_URL,
-                        files=files,
-                        data=data,
-                        timeout=120,
-                    )
-
-                if resp.status_code != 200:
-                    return jsonify({
-                        "success": False,
-                        "error": f"ResNet API HTTP {resp.status_code}"
-                    }), 502
+            for attempt in range(3):
+                print(f"\n[ResNet] Attempt {attempt+1}/3 sending request...")
 
                 try:
-                    return jsonify(resp.json())
-                except:
-                    return jsonify({
-                        "success": False,
-                        "error": "Invalid JSON from ResNet API"
-                    }), 502
+                    with open(fpath, "rb") as f:
+                        resp = requests.post(
+                            RESNET_API_URL,
+                            files={"file": (fname, f, img_file.mimetype)},
+                            data={"model_type": model_type,
+                                  "selected_class": selected_class},
+                            timeout=200
+                        )
+                except Exception as e:
+                    print("[ResNet] Network error:", e)
+                    print("[ResNet] Waiting 90 sec before retry...")
+                    time.sleep(90)
+                    continue
 
-            except Exception as e:
-                return jsonify({
-                    "success": False,
-                    "error": f"ResNet API failed: {e}"
-                }), 502
+                # If server is waking up → 503
+                if resp.status_code == 503:
+                    print("[ResNet] API cold start → Waiting 90 sec...")
+                    time.sleep(90)
+                    continue
+
+                if resp.status_code == 200:
+                    try:
+                        return jsonify(resp.json())
+                    except:
+                        return jsonify({
+                            "success": False,
+                            "error": "ResNet API returned invalid JSON format"
+                        }), 502
+
+                print(f"[ResNet] Server error: {resp.status_code}")
+                print("[ResNet] Waiting 90 sec...")
+                time.sleep(90)
+
+            return jsonify({
+                "success": False,
+                "error": "ResNet API failed after 3 attempts"
+            }), 502
 
         # ======================================================
-        # 2) CUSTOM / VGG → Local TFLite
+        # CUSTOM + VGG → LOCAL TFLITE INFERENCE
         # ======================================================
         if model_type not in MODEL_EVAL_JSON:
-            return jsonify({
-                "success": False,
-                "error": f"Unsupported model_type: {model_type}"
-            }), 400
+            return jsonify({"success": False, "error": f"Invalid model_type: {model_type}"}), 400
 
-        # class → model mapping
         class_info = MODEL_EVAL_JSON[model_type].get(cname)
         if class_info is None:
-            return jsonify({
-                "success": False,
-                "error": f"class not in JSON: {cname}"
-            }), 400
+            return jsonify({"success": False, "error": f"Class not found: {cname}"}), 400
 
         model_used = class_info["model_used"].lower()
 
         interpreter = load_tflite_model(model_used)
         if interpreter is None:
-            return jsonify({"success": False, "error": "Model load failed"}), 500
+            return jsonify({"success": False, "error": "Failed to load model"}), 500
 
         input_info = interpreter.get_input_details()[0]
         _, h, w, _ = input_info["shape"]
@@ -241,19 +237,16 @@ def predict():
         interpreter.set_tensor(input_info["index"], x)
         interpreter.invoke()
 
-        output_info = interpreter.get_output_details()[0]
-        preds = interpreter.get_tensor(output_info["index"]).squeeze().astype(float)
-
-        preds = np.nan_to_num(preds)
+        output = interpreter.get_output_details()[0]
+        preds = interpreter.get_tensor(output["index"]).squeeze().astype(float)
 
         idx = int(np.argmax(preds))
         confidence = float(np.max(preds))
 
-        # decode predicted label
         class_map = MODEL_CLASS_INDEX[model_used]
         predicted_label = next(k for k, v in class_map.items() if v == idx)
-        predicted_norm = normalize(predicted_label)
 
+        predicted_norm = normalize(predicted_label)
         predicted_info = MODEL_EVAL_JSON[model_type].get(predicted_norm, {})
 
         labels = list(class_map.keys())
@@ -264,29 +257,24 @@ def predict():
             "selected_class": selected_class,
             "predicted_label": predicted_label,
             "confidence": confidence,
-
             "accuracy": predicted_info.get("accuracy", "NA"),
             "precision": predicted_info.get("precision", "NA"),
             "recall": predicted_info.get("recall", "NA"),
             "f1_score": predicted_info.get("f1_score", "NA"),
-
             "confusion_matrix_labels": labels,
             "confusion_matrix_full": matrix,
-
             "model_used": model_used
         })
 
     finally:
-        # delete temp uploaded image
         if os.path.exists(fpath):
             try:
                 os.remove(fpath)
-                print("[CLEANUP] Deleted:", fpath)
             except:
                 pass
 
 # ===================================================================
-# MAIN
+#  MAIN
 # ===================================================================
 
 if __name__ == "__main__":
