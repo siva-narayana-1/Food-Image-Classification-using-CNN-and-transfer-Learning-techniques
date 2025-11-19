@@ -23,7 +23,7 @@ os.makedirs(TFLITE_DIR, exist_ok=True)
 GCS_BUCKET = "https://storage.googleapis.com/food-classification-models-bucket"
 
 # ResNet API Backend (Stored in another Render project)
-RESNET_API_URL = "https://resnet-api-creation.onrender.com/predict"
+RESNET_API_URL = "https://web-production-ba634.up.railway.app/predict"
 
 # ===================================================================
 #  NORMALIZE STRINGS
@@ -279,3 +279,4 @@ def predict():
 
 if __name__ == "__main__":
     app.run(debug=True)
+
