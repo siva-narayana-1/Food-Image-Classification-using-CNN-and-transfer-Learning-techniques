@@ -1,6 +1,3 @@
-Understood Siva — here is the **entire README in one single clean document**, no breaks, no sections split across messages.
-Just copy-paste as **README.md**.
-
 ---
 
 # 🍽️ Food Image Classification using CNN & Transfer Learning
